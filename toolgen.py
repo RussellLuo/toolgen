@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 from pydantic import BaseModel
@@ -234,7 +236,7 @@ class Filter(BaseModel):
 
 class Spec(dict):
     @classmethod
-    def from_path(cls, path: str) -> "Spec":
+    def from_path(cls, path: str) -> Spec:
         with open(path, "r") as f:
             if path.endswith((".yaml", ".yml")):
                 return yaml.safe_load(f)
@@ -244,11 +246,11 @@ class Spec(dict):
                 raise ValueError("Unsupported file format")
 
     @classmethod
-    def from_url(cls, url: str) -> "Spec":
+    def from_url(cls, url: str) -> Spec:
         raise NotImplementedError
 
     @classmethod
-    def from_json(cls, content: str | bytes) -> "Spec":
+    def from_json(cls, content: str | bytes) -> Spec:
         return json.loads(content)
 
 
@@ -265,10 +267,6 @@ class Generator:
 
     def generate_sdk(self, filter_: Filter) -> str:
         filter_model_names = self._collect_model_names(filter_)
-        import pdb
-
-        pdb.set_trace()
-
         models = self._generate_models(filter_model_names)
         client_class = self._generate_client_class(filter_)
         return Template(SDK_TEMPLATE).render(models=models, client_class=client_class)
