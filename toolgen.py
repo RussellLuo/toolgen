@@ -57,7 +57,7 @@ import httpx
 from pydantic import BaseModel, Field
 from pydantic.fields import FieldInfo
 
-{{ models }}
+{{- models }}
 
 {{ client_class }}
 
@@ -110,7 +110,7 @@ OPERATION_TEMPLATE = """\
         })
         {%- endif %}
         {%- if body_params %}
-        body = {{ body_params[0].name }}.model_dump(exclude_none=True)
+        body = {{ body_params[0].name }}.model_dump(exclude_none=True) if {{ body_params[0].name }} else {}
         {%- endif %}
         return self._handle_response(
             await self.client.{{ method }}(
@@ -133,12 +133,12 @@ from typing import Any, AsyncIterator
 
 from pydantic import Field
 from mcp.server.fastmcp import Context, FastMCP
-from {{ sdk_modname }} import Client
+import {{ sdk_modname }} as sdk
 
 
 @dataclass
 class AppContext:
-    client: Client
+    client: sdk.Client
 
 
 @asynccontextmanager
@@ -147,9 +147,9 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     try:
         # Initialize on startup
         {%- if base_url %}
-        client = Client(token="{{ token }}", base_url="{{ base_url }}")
+        client = sdk.Client(api_key="{{ api_key }}", base_url="{{ base_url }}")
         {%- else %}
-        client = Client(token="{{ token }}")
+        client = sdk.Client(api_key="{{ api_key }}")
         {%- endif %}
         yield AppContext(client=client)
     finally:
@@ -177,7 +177,7 @@ TOOL_TEMPLATE = '''\
 async def {{ name }}(
     mcp_ctx: Context,
     {%- for param in params %}
-    {{ param.name }}: {{ param.type }} = Field(
+    {{ param.name }}: {% if param.in == "body" %}sdk.{% endif %}{{ param.type }} = Field(
         {%- if param.required %}..., {% else %}default={{ param.default }}, {% endif -%}
         description={{ param.description -}}
     ),
@@ -195,12 +195,12 @@ async def {{ name }}(
 
 CLIENT_HEADER_TEMPLATE = """
 class Client:
-    def __init__(self, token: str, base_url: str = {{ base_url }}, timeout: float = 30.0):
+    def __init__(self, api_key: str, base_url: str = {{ base_url }}, timeout: float = 30.0):
         {%- if security and security.in_ == 'header' %}
-        headers = {"{{ security.name }}": token}
+        headers = {"{{ security.name }}": api_key}
         self.client = httpx.AsyncClient(base_url=base_url, timeout=timeout, headers=headers)
         {%- elif security and security.in_ == 'query' %}
-        params = {"{{ security.name }}": token}
+        params = {"{{ security.name }}": api_key}
         self.client = httpx.AsyncClient(base_url=base_url, timeout=timeout, params=params)
         {%- else %}
         self.client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
@@ -272,12 +272,12 @@ class Generator:
         return Template(SDK_TEMPLATE).render(models=models, client_class=client_class)
 
     def generate_mcp(
-        self, sdk_modname: str, base_url: str, token: str, filter_: Filter
+        self, sdk_modname: str, base_url: str, api_key: str, filter_: Filter
     ) -> str:
         tools = self._parse_tools(filter_)
         tools_code = [Template(TOOL_TEMPLATE).render(tool) for tool in tools]
         return Template(MCP_TEMPLATE).render(
-            sdk_modname=sdk_modname, base_url=base_url, token=token, tools=tools_code
+            sdk_modname=sdk_modname, base_url=base_url, api_key=api_key, tools=tools_code
         )
 
     def _parse_tools(self, filter_: Filter) -> list[Tool]:
@@ -329,6 +329,15 @@ class Generator:
 
         return dependent_model_names
 
+    def _does_model_have_required_fields(self, parent_model_name: str) -> bool:
+        definitions = self.spec.get("definitions", {})
+        for model_name, schema in definitions.items():
+            model_name = normalize_name(model_name)
+            if model_name == parent_model_name:
+                if schema.get("type") == "object":
+                    return bool(schema.get("required", []))
+        return False
+
     def _parse_schema(self, schema: dict[str, Any]) -> set[str]:
         # TODO: merge with _map_swagger_type
 
@@ -337,7 +346,9 @@ class Generator:
         ref = schema.get("$ref")
         if ref:
             name = normalize_name(ref.split("/")[-1])
+            dependent_names = self._get_dependent_model_names(name)
             model_names.add(name)
+            model_names.update(dependent_names)
             return model_names
 
         # Recursively traverse all objects and arrays of the schema, and collect all "$ref" references.
@@ -375,7 +386,7 @@ class Generator:
                 yield path, method, operation
 
     def _generate_models(self, filter_model_names: set[str]) -> str:
-        code = "\n# Data Models"
+        code = ""
         definitions = self.spec.get("definitions", {})
 
         for model_name, schema in definitions.items():
@@ -542,13 +553,18 @@ class Generator:
                 # Skip other types for now (e.g. formData)
                 continue
 
-            param_type = self._map_swagger_type(param)
+            required = param.get("required", False)
+            if param_in == "body":
+                param_type = self._map_swagger_type(param["schema"])
+                required = required and self._does_model_have_required_fields(param_type)
+            else:
+                param_type = self._map_swagger_type(param)
             param_def = {
                 "name": param["name"],
                 "in": param_in,
                 "type": param_type,
                 "description": f'{param.get("description", "")!r}',
-                "required": param.get("required", False),
+                "required": required,
                 "default": f'{param.get("default")!r}',
             }
             params[param_in].append(param_def)
@@ -634,7 +650,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--base_url", default="", help="The base URL of the server")
     parser.add_argument(
-        "--token", default="", help="The access token (or API key) of the server"
+        "--api_key", default="", help="The API key (or access token) of the server"
     )
     parser.add_argument("--tag", help="The specific tag to generate code for")
     parser.add_argument("--path", help="The specific path to generate code for")
@@ -661,5 +677,5 @@ if __name__ == "__main__":
 
     with open(mcp_output_file, "w+") as f:
         sdk_modname = sdk_output_file.stem
-        code = gen.generate_mcp(sdk_modname, args.base_url, args.token, filter_)
+        code = gen.generate_mcp(sdk_modname, args.base_url, args.api_key, filter_)
         f.write(code)
