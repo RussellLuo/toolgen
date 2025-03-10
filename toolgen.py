@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-from pydantic import BaseModel
-from typing import Any, Iterator
-
 import json
-import yaml
+from pathlib import Path
+from typing import Any, Iterator, Literal
+
 from jinja2 import Template
+from pydantic import BaseModel
+import requests
+import yaml
+
+# OpenAPI document format
+Format = Literal["YAML", "JSON"]
 
 
 class Security(BaseModel):
@@ -238,20 +242,27 @@ class Spec(dict):
     @classmethod
     def from_path(cls, path: str) -> Spec:
         with open(path, "r") as f:
-            if path.endswith((".yaml", ".yml")):
-                return yaml.safe_load(f)
-            elif path.endswith(".json"):
-                return json.load(f)
-            else:
-                raise ValueError("Unsupported file format")
+            content = f.read()
+            format = "JSON" if path.endswith(".json") else "YAML"
+            return cls.from_content(content, format)
 
     @classmethod
     def from_url(cls, url: str) -> Spec:
-        raise NotImplementedError
+        resp = requests.get(url)
+        resp.raise_for_status()
+
+        content = resp.text
+        format = "JSON" if url.endswith(".json") else "YAML"
+        return cls.from_content(content, format)
 
     @classmethod
-    def from_json(cls, content: str | bytes) -> Spec:
-        return json.loads(content)
+    def from_content(cls, content: str | bytes, format: Format) -> Spec:
+        if format == "YAML":
+            return yaml.safe_load(content)
+        elif format == "JSON":
+            return json.loads(content)
+        else:
+            raise ValueError("Unsupported format")
 
 
 class Generator:
@@ -272,7 +283,7 @@ class Generator:
         return Template(SDK_TEMPLATE).render(models=models, client_class=client_class)
 
     def generate_mcp(
-        self, sdk_modname: str, base_url: str, api_key: str, filter_: Filter
+        self, sdk_modname: str, filter_: Filter, base_url: str = "", api_key: str = ""
     ) -> str:
         tools = self._parse_tools(filter_)
         tools_code = [Template(TOOL_TEMPLATE).render(tool) for tool in tools]
