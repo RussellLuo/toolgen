@@ -288,7 +288,10 @@ class Generator:
         tools = self._parse_tools(filter_)
         tools_code = [Template(TOOL_TEMPLATE).render(tool) for tool in tools]
         return Template(MCP_TEMPLATE).render(
-            sdk_modname=sdk_modname, base_url=base_url, api_key=api_key, tools=tools_code
+            sdk_modname=sdk_modname,
+            base_url=base_url,
+            api_key=api_key,
+            tools=tools_code,
         )
 
     def _parse_tools(self, filter_: Filter) -> list[Tool]:
@@ -567,7 +570,9 @@ class Generator:
             required = param.get("required", False)
             if param_in == "body":
                 param_type = self._map_swagger_type(param["schema"])
-                required = required and self._does_model_have_required_fields(param_type)
+                required = required and self._does_model_have_required_fields(
+                    param_type
+                )
             else:
                 param_type = self._map_swagger_type(param)
             param_def = {
@@ -655,7 +660,9 @@ def oas_type_to_py_type(oas_type: str) -> str:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("spec_file", help="Path to the spec file")
+    parser.add_argument(
+        "spec_path", help="The local path or remote URL to the OpenAPI document"
+    )
     parser.add_argument(
         "--output_dir", default=".", help="Directory to the output file"
     )
@@ -670,9 +677,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    spec_file_path = Path(args.spec_file)
-    sdk_output_file = Path(args.output_dir) / f"{spec_file_path.stem}_sdk.py"
-    mcp_output_file = Path(args.output_dir) / f"{spec_file_path.stem}_mcp.py"
+    spec_path = Path(args.spec_path)
+    sdk_output_file = Path(args.output_dir) / f"{spec_path.stem}_sdk.py"
+    mcp_output_file = Path(args.output_dir) / f"{spec_path.stem}_mcp.py"
 
     filter_ = Filter(
         tags=[args.tag] if args.tag else None,
@@ -680,13 +687,17 @@ if __name__ == "__main__":
         methods=[args.method] if args.method else None,
     )
 
-    spec = Spec.from_path(args.spec_file)
+    if args.spec_path.startswith(("http://", "https://")):
+        spec = Spec.from_url(args.spec_path)
+    else:
+        spec = Spec.from_path(args.spec_path)
     gen = Generator(spec)
+
     with open(sdk_output_file, "w+") as f:
         code = gen.generate_sdk(filter_)
         f.write(code)
 
     with open(mcp_output_file, "w+") as f:
         sdk_modname = sdk_output_file.stem
-        code = gen.generate_mcp(sdk_modname, args.base_url, args.api_key, filter_)
+        code = gen.generate_mcp(sdk_modname, filter_, args.base_url, args.api_key)
         f.write(code)
