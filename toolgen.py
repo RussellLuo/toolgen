@@ -34,6 +34,15 @@ class EnumField(BaseModel):
     value: str
 
 
+class PathDef(BaseModel):
+    path: str
+    method: str
+    operation: dict
+
+    # Common Parameters for All Methods of a Path
+    parameters: list[dict] | None = None
+
+
 class Operation(BaseModel):
     path: str
     method: str
@@ -297,8 +306,8 @@ class Generator:
     def _parse_tools(self, filter_: Filter) -> list[Tool]:
         tools: list[Tool] = []
 
-        for path, method, operation in self._visit_paths(filter_):
-            op = self._parse_operation(method, path, operation)
+        for path_def in self._visit_paths(filter_):
+            op = self._parse_operation(path_def)
             tools.append(
                 Tool(
                     name=op.func_name,
@@ -310,17 +319,20 @@ class Generator:
         return tools
 
     def _collect_model_names(self, filter_: Filter) -> set[str]:
-        """get definition model name from path parameters."""
+        """Get definition model name from path parameters."""
         model_names = set()
-        for _, method, operation in self._visit_paths(filter_):
-            params = operation.get("parameters", [])
+        for path_def in self._visit_paths(filter_):
+            op = path_def.operation
+            params = op.get("parameters", [])
             for param in params:
+                # Per the doc: https://swagger.io/docs/specification/v2_0/describing-parameters/#faq
+                # schema is only used with in: body parameters.
                 schema = param.get("schema")
                 if schema:
                     names = self._parse_schema(schema)
                     model_names.update(names)
 
-            resps = operation.get("responses", {})
+            resps = op.get("responses", {})
             for status_code, resp in resps.items():
                 schema = resp.get("schema")
                 if schema:
@@ -385,19 +397,27 @@ class Generator:
 
         return model_names
 
-    def _visit_paths(self, filter_: Filter) -> Iterator[tuple[str, str, dict]]:
+    def _visit_paths(self, filter_: Filter) -> Iterator[PathDef]:
         for path, path_item in self.spec.get("paths", {}).items():
             if not filter_.contain_path(path):
                 continue
 
+            parameters = path_item.get("parameters", [])
             for method, operation in path_item.items():
+                if method == "parameters":
+                    # Per the doc: https://swagger.io/docs/specification/v2_0/describing-parameters/#common-parameters
+                    # This is the Common Parameters for All Methods of a Path
+                    continue
+
                 if not filter_.contain_tag(operation.get("tags", [])):
                     continue
 
                 if not filter_.contain_method(method):
                     continue
 
-                yield path, method, operation
+                yield PathDef(
+                    path=path, method=method, operation=operation, parameters=parameters
+                )
 
     def _generate_models(self, filter_model_names: set[str]) -> str:
         code = ""
@@ -426,6 +446,11 @@ class Generator:
             return self.gen_model_from_str_enum(model_name, enum)
         if enum and typ == "integer":
             return self.gen_model_from_int_enum(model_name, enum)
+
+        allof = schema.get("allOf")
+        if allof:
+            return self.gen_model_from_allof(model_name, allof, base_model_model)
+        return ""
 
     def gen_model_from_object(
         self,
@@ -507,6 +532,39 @@ class Generator:
             fields=fields,
         )
 
+    def gen_model_from_allof(
+        self, model_name: str, allof: list[dict], base_model_model: str
+    ) -> str:
+        final_schema = {
+            "type": "object",
+            "properties": {},
+        }
+        required = set()
+
+        for part in allof:
+            ref = part.get("$ref")
+            if ref:
+                model_def = self._get_global_model_def(ref)
+            else:
+                model_def = part
+            if model_def:
+                final_schema["properties"].update(model_def.get("properties", {}))
+                required.update(set(model_def.get("required", [])))
+
+        if required:
+            final_schema["required"] = list(required)
+
+        return self.gen_model_from_object(model_name, final_schema, base_model_model)
+
+    def _get_global_model_def(self, ref) -> dict:
+        if not ref.startswith("#/definitions"):
+            # Invalid definition
+            return {}
+
+        model_name = ref.split("/")[-1]
+        global_defs = self.spec.get("definitions", {})
+        return global_defs.get(model_name, {})
+
     def _generate_client_class(self, filter_: Filter) -> str:
         security = self._parse_security_definitions(
             self.spec.get("securityDefinitions", {})
@@ -516,14 +574,14 @@ class Generator:
             security=security,
         )
 
-        for path, method, operation in self._visit_paths(filter_):
+        for path_def in self._visit_paths(filter_):
             code += "\n" * 2
-            code += self._generate_operation(method, path, operation)
+            code += self._generate_operation(path_def)
 
         return code
 
-    def _generate_operation(self, method: str, path: str, operation: dict) -> str:
-        op = self._parse_operation(method, path, operation)
+    def _generate_operation(self, path_def: PathDef) -> str:
+        op = self._parse_operation(path_def)
         return Template(OPERATION_TEMPLATE).render(op)
 
     def _parse_security_definitions(
@@ -541,27 +599,38 @@ class Generator:
                     description=definition.get("description", ""),
                 )
 
-    def _parse_operation(self, method: str, path: str, operation: dict) -> Operation:
-        func_name = operation.get("operationId", self._generate_func_name(method, path))
+    def _parse_operation(self, path_def: PathDef) -> Operation:
+        op = path_def.operation
+        func_name = op.get(
+            "operationId", self._generate_func_name(path_def.method, path_def.path)
+        )
         func_name = normalize_name(func_name)
 
-        params = self._parse_parameters(operation.get("parameters", []))
-        op = Operation(
-            path=path,
-            method=method,
+        op_parameters = op.get("parameters", [])
+        params = self._parse_parameters(path_def.parameters + op_parameters)
+        return Operation(
+            path=path_def.path,
+            method=path_def.method,
             func_name=func_name,
             path_params=params["path"],
             query_params=params["query"],
             body_params=params["body"],
-            return_type=self._get_return_type(operation),
-            description=operation.get("summary", ""),
+            return_type=self._get_return_type(op),
+            description=op.get("summary", ""),
         )
-        return op
 
     def _parse_parameters(self, parameters: list) -> dict:
         params = {"path": [], "query": [], "body": []}
 
         for param in parameters:
+            ref = param.get("$ref")
+            if ref:
+                # Per the doc: https://swagger.io/docs/specification/v2_0/describing-parameters/#common-parameters
+                # This ia an reference to global parameters.
+                param = self._get_global_param_def(ref)
+                if not param:
+                    continue
+
             param_in = param["in"]
             if param_in not in ("path", "query", "body"):
                 # Skip other types for now (e.g. formData)
@@ -586,6 +655,15 @@ class Generator:
             params[param_in].append(param_def)
 
         return params
+
+    def _get_global_param_def(self, ref: str) -> dict:
+        if not ref.startswith("#/parameters"):
+            # Invalid definition
+            return {}
+
+        param_name = ref.split("/")[-1]
+        global_params = self.spec.get("parameters", {})
+        return global_params.get(param_name, {})
 
     def _get_return_type(self, operation: dict) -> str:
         success_resp = operation.get("responses", {}).get("200", {})
