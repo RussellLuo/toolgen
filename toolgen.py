@@ -622,6 +622,8 @@ class Generator:
     def _parse_parameters(self, parameters: list) -> dict:
         params = {"path": [], "query": [], "body": []}
 
+        processed_param_names = set()
+
         for param in parameters:
             ref = param.get("$ref")
             if ref:
@@ -630,6 +632,11 @@ class Generator:
                 param = self._get_global_param_def(ref)
                 if not param:
                     continue
+
+            if param["name"] in processed_param_names:
+                # Skip duplicate parameters
+                continue
+            processed_param_names.add(param["name"])
 
             param_in = param["in"]
             if param_in not in ("path", "query", "body"):
