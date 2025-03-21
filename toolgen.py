@@ -170,7 +170,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         pass
 
 
-mcp = FastMCP("MCP-erver", lifespan=app_lifespan, port=7860)
+mcp = FastMCP("MCP-server", lifespan=app_lifespan, port={{ port }})
 
 
 {%- for tool in tools %}
@@ -292,7 +292,12 @@ class Generator:
         return Template(SDK_TEMPLATE).render(models=models, client_class=client_class)
 
     def generate_mcp(
-        self, sdk_modname: str, filter_: Filter, base_url: str = "", api_key: str = ""
+        self,
+        sdk_modname: str,
+        filter_: Filter,
+        base_url: str = "",
+        api_key: str = "",
+        mcp_port: int = 8000,
     ) -> str:
         tools = self._parse_tools(filter_)
         tools_code = [Template(TOOL_TEMPLATE).render(tool) for tool in tools]
@@ -300,6 +305,7 @@ class Generator:
             sdk_modname=sdk_modname,
             base_url=base_url,
             api_key=api_key,
+            port=mcp_port,
             tools=tools_code,
         )
 
@@ -436,12 +442,12 @@ class Generator:
         self,
         model_name: str,
         schema: dict[str, Any],
-        base_model_model: str = "BaseModel",
+        base_model_name: str = "BaseModel",
     ) -> str:
         typ = schema.get("type")
         enum = schema.get("enum")
         if typ == "object":
-            return self.gen_model_from_object(model_name, schema, base_model_model)
+            return self.gen_model_from_object(model_name, schema, base_model_name)
         if enum and typ == "string":
             return self.gen_model_from_str_enum(model_name, enum)
         if enum and typ == "integer":
@@ -449,14 +455,14 @@ class Generator:
 
         allof = schema.get("allOf")
         if allof:
-            return self.gen_model_from_allof(model_name, allof, base_model_model)
+            return self.gen_model_from_allof(model_name, allof, base_model_name)
         return ""
 
     def gen_model_from_object(
         self,
         model_name: str,
         schema: dict[str, Any],
-        base_model_model: str = "BaseModel",
+        base_model_name: str = "BaseModel",
     ) -> str:
         fields: list[ModelField] = []
 
@@ -464,7 +470,7 @@ class Generator:
         if not properties:
             return Template(MODEL_TEMPLATE).render(
                 model_name=model_name,
-                base_model_name=base_model_model,
+                base_model_name=base_model_name,
                 fields=fields,
             )
 
@@ -486,7 +492,7 @@ class Generator:
 
         return Template(MODEL_TEMPLATE).render(
             model_name=model_name,
-            base_model_name=base_model_model,
+            base_model_name=base_model_name,
             fields=fields,
         )
 
@@ -533,7 +539,7 @@ class Generator:
         )
 
     def gen_model_from_allof(
-        self, model_name: str, allof: list[dict], base_model_model: str
+        self, model_name: str, allof: list[dict], base_model_name: str
     ) -> str:
         final_schema = {
             "type": "object",
@@ -554,7 +560,7 @@ class Generator:
         if required:
             final_schema["required"] = list(required)
 
-        return self.gen_model_from_object(model_name, final_schema, base_model_model)
+        return self.gen_model_from_object(model_name, final_schema, base_model_name)
 
     def _get_global_model_def(self, ref) -> dict:
         if not ref.startswith("#/definitions"):
@@ -628,7 +634,7 @@ class Generator:
             ref = param.get("$ref")
             if ref:
                 # Per the doc: https://swagger.io/docs/specification/v2_0/describing-parameters/#common-parameters
-                # This ia an reference to global parameters.
+                # This is an reference to global parameters.
                 param = self._get_global_param_def(ref)
                 if not param:
                     continue
@@ -748,17 +754,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "spec_path", help="The local path or remote URL to the OpenAPI document"
     )
-    parser.add_argument(
-        "--output_dir", default=".", help="Directory to the output file"
-    )
-    parser.add_argument("--base_url", default="", help="The base URL of the server")
-    parser.add_argument(
-        "--api_key", default="", help="The API key (or access token) of the server"
-    )
     parser.add_argument("--tag", help="The specific tag to generate code for")
     parser.add_argument("--path", help="The specific path to generate code for")
     parser.add_argument(
         "--method", help="The specific method of the path to generate code for"
+    )
+    parser.add_argument(
+        "--output_dir", default=".", help="Directory to the output file"
+    )
+    parser.add_argument("--base_url", default="", help="The base URL of the API server")
+    parser.add_argument(
+        "--api_key", default="", help="The API key (or access token) of the API server"
+    )
+    parser.add_argument(
+        "--mcp_port",
+        type=int,
+        default=8000,
+        help="The listening port of the MCP server",
     )
     args = parser.parse_args()
 
@@ -784,5 +796,7 @@ if __name__ == "__main__":
 
     with open(mcp_output_file, "w+") as f:
         sdk_modname = sdk_output_file.stem
-        code = gen.generate_mcp(sdk_modname, filter_, args.base_url, args.api_key)
+        code = gen.generate_mcp(
+            sdk_modname, filter_, args.base_url, args.api_key, args.mcp_port
+        )
         f.write(code)
